@@ -21,8 +21,9 @@ plt.rcParams['axes.unicode_minus'] = False
 st.set_page_config(page_title="量子多体动力学数据看板", layout="wide")
 
 # ================= 核心配置区 =================
-# 【重要】请将这里替换为你存放 L=... 文件夹的根目录！
-DATA_DIR = r"Y:\[Projects]\Dimer Dissociation\simulation_rawdata"
+# 【修改点】使用自适应相对路径。云端和本地通用！
+# 它会自动寻找和 app.py 放在同一个文件夹下的 "Data" 文件夹
+DATA_DIR = os.path.join(os.path.dirname(__file__), "RawData")
 REGISTRY_FILE = "file_registry.csv"
 
 
