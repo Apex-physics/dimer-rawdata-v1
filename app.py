@@ -8,21 +8,17 @@ import io
 import datetime
 
 # ================= 解决 Matplotlib 中文乱码问题 =================
-# 自动寻找代码同级目录下的 simhei.ttf 字体文件，解决云端 Linux 没有中文字体的问题
 font_path = os.path.join(os.path.dirname(__file__), "simhei.ttf")
 if os.path.exists(font_path):
     fm.fontManager.addfont(font_path)
     plt.rcParams['font.family'] = fm.FontProperties(fname=font_path).get_name()
 else:
-    # 如果没找到字体文件（比如在本地运行），兜底使用系统字体
     plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS', 'sans-serif']
 plt.rcParams['axes.unicode_minus'] = False
 
 st.set_page_config(page_title="量子多体动力学数据看板", layout="wide")
 
 # ================= 核心配置区 =================
-# 【修改点】使用自适应相对路径。云端和本地通用！
-# 它会自动寻找和 app.py 放在同一个文件夹下的 "Data" 文件夹
 DATA_DIR = os.path.join(os.path.dirname(__file__), "RawData")
 REGISTRY_FILE = "file_registry.csv"
 
@@ -51,17 +47,26 @@ def scan_and_build_registry():
 
         for file in files:
             if file.endswith('.npz') and file.startswith('SimData'):
+                # 尝试从文件名解析 eta 和 chi
                 try:
-                    eta_str = file.split('eta')[1].replace('.npz', '')
+                    # 提取 eta
+                    eta_str = file.split('eta=')[1].split('_')[0]
                     eta = float(eta_str)
                 except Exception:
-                    continue
+                    eta = 0.0
 
                 file_path = os.path.join(root, file)
                 try:
                     data = np.load(file_path, allow_pickle=True)
                     meta_dict = data['metadata'][0]
-                    chi = int(meta_dict.get('chi_max', 512))
+
+                    # 识别 chi：优先从文件名末尾匹配，否则看 metadata
+                    if 'chi=' in file:
+                        chi_str = file.split('chi=')[-1].replace('.npz', '')
+                        chi = int(chi_str)
+                    else:
+                        chi = int(meta_dict.get('chi_max', 512))
+
                     nmax = int(meta_dict.get('n_max', 3))
                     bc = 'OBC'
                     data.close()
@@ -75,7 +80,7 @@ def scan_and_build_registry():
 
     if records:
         df = pd.DataFrame(records)
-        df = df.sort_values(by=['L', 'Init', 'Freq', 'U', 'eta']).reset_index(drop=True)
+        df = df.sort_values(by=['L', 'Init', 'Freq', 'U', 'eta', 'chi']).reset_index(drop=True)
         df.to_csv(REGISTRY_FILE, index=False)
         return True, len(df)
     else:
@@ -129,7 +134,8 @@ def process_target_data(times, occ_arr, P0_arr, P1_arr, P2_arr, L, obs_mode, sit
         region_P1 = P1_arr[:, start_idx:end_idx]
         region_P2 = P2_arr[:, start_idx:end_idx]
 
-        odd_mask = np.array([(start_idx + i) % 2 == 0 for i in range(end_idx - start_idx)])
+        # 注意：这里保持和原代码一致的 mask 逻辑
+        odd_mask = np.array([(start_idx + i) % 2 != 0 for i in range(end_idx - start_idx)])
         even_mask = ~odd_mask
 
         if metric == "N全平均": return np.mean(region_N, axis=1)
@@ -222,6 +228,10 @@ df_f = df_f[df_f['J'] == param_J]
 param_eta = st.sidebar.selectbox("驱动强度 (η)", sorted(df_f['eta'].unique()))
 df_f = df_f[df_f['eta'] == param_eta]
 
+# 新增：允许在单组探索中选择不同的 chi 展现
+param_chi = st.sidebar.selectbox("截断维数 (χ)", sorted(df_f['chi'].unique(), reverse=True))
+df_f = df_f[df_f['chi'] == param_chi]
+
 if df_f.empty:
     st.error("该实验条件下暂时没有数据，请调整参数。")
     st.stop()
@@ -232,7 +242,7 @@ current_data_row = df_f.iloc[0].to_dict()
 st.title("量子多体动力学看板")
 col_algo, col_chi, col_nmax, col_bc = st.columns(4)
 col_algo.metric("算法", "TEBD (TeNPy)")
-col_chi.metric("截断维数 (χ)", current_data_row['chi'])
+col_chi.metric("当前显示 χ", current_data_row['chi'])
 col_nmax.metric("局域玻色子 (n_max)", current_data_row['nmax'])
 col_bc.metric("边界条件", current_data_row['bc'])
 st.markdown("---")
@@ -295,26 +305,17 @@ with col_main:
             ax.legend()
             st.pyplot(fig)
 
-            # 【新增】传递误差展示区
+            # 传递误差展示区
             with st.expander("查看传递误差累积曲线 (Propagation Error)", expanded=False):
                 fig_err, ax_err = plt.subplots(figsize=(9, 2.5))
-                # 注意：这里展示的是未截断的原始全长误差数据，以便用户观察全局
                 ax_err.plot(times, err_prop, color='orange', linestyle='-', label='传递误差 (Propagation Error)')
-
-                # 如果开启了自定义截断，画一条红线指示阈值位置
                 if single_cutoff_mode == "自定义误差截断" and single_err_limit is not None:
                     ax_err.axhline(single_err_limit, color='r', linestyle='--', label=f'截断阈值: {single_err_limit}%')
-
                 ax_err.set_xlabel(f"Time ({time_axis_unit})")
                 ax_err.set_ylabel("Error (%)")
                 ax_err.grid(True, alpha=0.3)
                 ax_err.legend()
                 st.pyplot(fig_err)
-
-                # 严谨的学术提示
-                st.info(
-                    "ℹ️ 注：当前图表仅展示 **传递误差 (Propagation Error)**。截断误差 (Truncation Error) 等其他演化误差的影响，请参阅右侧面板的『截断收敛性验证 (χ)』静态报告。")
-
         elif len(times) == 0:
             st.error("数据读取失败，请检查 npz 文件。")
         else:
@@ -322,18 +323,16 @@ with col_main:
 
     # ---------------- 标签页 B：跨条件四级搜索构建器 ----------------
     with tab_compare:
-        st.markdown("#### 自由对比曲线构建器 (4级选取)")
-
-        # 第一步：物理条件融合为一个下拉菜单，避免过多组件拥挤
+        st.markdown("#### 自由对比曲线构建器")
         all_exp_strs = []
-        for _, row in df_registry.iterrows():
+        df_registry_sorted = df_registry.sort_values(by=['L', 'Init', 'Freq', 'U', 'J', 'eta', 'chi'])
+        for _, row in df_registry_sorted.iterrows():
             all_exp_strs.append(
-                f"L={row['L']} | {row['Init']} | F={row['Freq']} | U={row['U']} | J={row['J']} | η={row['eta']}")
+                f"L={row['L']} | {row['Init']} | F={row['Freq']} | U={row['U']} | J={row['J']} | η={row['eta']} | χ={row['chi']}")
 
-        b_exp_str = st.selectbox("[1] 选择基础物理条件 (尺寸/初态/频率/U/J/η)", all_exp_strs)
-        # 反向解析选中行的 L 值
+        b_exp_str = st.selectbox("[1] 选择基础物理条件 (包含 χ)", all_exp_strs)
         b_idx = all_exp_strs.index(b_exp_str)
-        b_row_data = df_registry.iloc[b_idx].to_dict()
+        b_row_data = df_registry_sorted.iloc[b_idx].to_dict()
         b_L = b_row_data['L']
 
         c4, c5, c6 = st.columns(3)
@@ -349,10 +348,8 @@ with col_main:
             if b_L not in b_range_opts: b_range_opts.append(b_L)
             b_site_or_range = c5.selectbox("[3] 局域范围", b_range_opts, index=len(b_range_opts) - 1, key="b_range")
             b_metric_opts = [
-                "和现有输出一致",
-                "N全平均", "N_odd平均", "N_even平均", "Imbalance",
-                "P0全平均", "P0_odd平均", "P0_even平均",
-                "P1全平均", "P1_odd平均", "P1_even平均",
+                "和现有输出一致", "N全平均", "N_odd平均", "N_even平均", "Imbalance",
+                "P0全平均", "P0_odd平均", "P0_even平均", "P1全平均", "P1_odd平均", "P1_even平均",
                 "P2全平均", "P2_odd平均", "P2_even平均"
             ]
             prefix_desc = f"范围 {b_site_or_range}"
@@ -360,17 +357,7 @@ with col_main:
         b_metric = c6.selectbox("[4] 物理量", b_metric_opts, key="b_metric")
 
         if st.button("将该曲线加入对比池"):
-            metrics_to_add = []
-            if b_metric == "和现有输出一致":
-                if b_obs_mode != obs_mode_global:
-                    st.error("操作被拒绝：Tab 2 选择的【观察区域】与 Tab 1 不一致，无法直接克隆。")
-                elif not target_metrics:
-                    st.warning("Tab 1 中没有选择任何物理量。")
-                else:
-                    metrics_to_add = target_metrics
-            else:
-                metrics_to_add = [b_metric]
-
+            metrics_to_add = [b_metric] if b_metric != "和现有输出一致" else target_metrics
             for m in metrics_to_add:
                 line_config = {
                     'desc': f"{b_exp_str.replace(' | ', ', ')} | {prefix_desc} {m}",
@@ -383,7 +370,6 @@ with col_main:
                     st.success(f"已加入: {line_config['desc']}")
 
         st.markdown("---")
-
         if st.session_state.compare_lines:
             c_align1, c_align2 = st.columns([1, 2])
             comp_x_mode = c_align1.radio("横轴对齐基准", ["以最大长度为准", "以最短长度为准", "自定义误差截断"],
@@ -397,41 +383,93 @@ with col_main:
 
             fig_c, ax_c = plt.subplots(figsize=(9, 4.5))
             max_times = []
-
             for line in st.session_state.compare_lines:
                 t_m, o_m, p0_m, p1_m, p2_m, e_m = get_real_data(line['file_path'], time_axis_unit)
                 y_m = process_target_data(t_m, o_m, p0_m, p1_m, p2_m, line['L'], line['obs_mode'],
                                           line['site_or_range'], line['metric'])
-
-                # 在画图前应用截断
-                if comp_x_mode == "自定义误差截断":
-                    t_plot, y_plot = apply_truncation(t_m, y_m, e_m, comp_x_mode, comp_err_limit)
-                else:
-                    t_plot, y_plot = t_m, y_m
-
+                t_plot, y_plot = apply_truncation(t_m, y_m, e_m, comp_x_mode, comp_err_limit)
                 if len(t_plot) > 0:
                     max_times.append(t_plot[-1])
                     ax_c.plot(t_plot, y_plot, label=line['desc'])
-
-            # 处理长短轴对齐
             if len(max_times) > 0:
                 if comp_x_mode == "以最短长度为准":
                     ax_c.set_xlim(0, min(max_times))
                 elif comp_x_mode == "以最大长度为准":
                     ax_c.set_xlim(0, max(max_times))
-
             ax_c.set_xlabel(f"Time ({time_axis_unit})")
             ax_c.set_ylabel("Value")
-            ax_c.legend(loc='upper right', bbox_to_anchor=(1.0, 1.15))
+            ax_c.legend(loc='upper right', bbox_to_anchor=(1.0, 1.15), fontsize='small')
             ax_c.grid(True, alpha=0.3)
             st.pyplot(fig_c)
-        else:
-            st.caption("对比池为空，请在上方构建曲线。")
 
-# ---------------- 6. 右侧：静态收敛性展示 ----------------
+# ---------------- 6. 右侧：截断收敛性展示 (新增实现) ----------------
 with col_side:
-    st.markdown("### 截断收敛性验证")
-    st.markdown(f"**当前选中系统 χ = {current_data_row['chi']}**")
+    st.markdown("### 💠 截断收敛性验证 (χ)")
 
-    with st.expander(f"查看针对 χ={current_data_row['chi']} 的收敛性测试报告", expanded=True):
-        st.markdown("正在统计...")
+    # 获取物理参数相同但 chi 不同的所有数据
+    converge_df = df_registry[
+        (df_registry['L'] == param_L) &
+        (df_registry['Init'] == param_init) &
+        (df_registry['Freq'] == param_freq) &
+        (df_registry['U'] == param_U) &
+        (df_registry['J'] == param_J) &
+        (df_registry['eta'] == param_eta)
+        ].sort_values(by='chi', ascending=False)  # chi 从大到小
+
+    if len(converge_df) < 2:
+        st.write("📊 **当前状态**")
+        st.warning("暂无对比数据")
+        st.caption("提示：在同一目录下放置物理参数相同但 chi 值不同的 .npz 文件即可自动生成对比图。")
+    else:
+        st.write(f"检测到 **{len(converge_df)}** 组 χ 数据")
+
+        # 默认对比主视图中选中的第一个物理量
+        test_metric = target_metrics[0] if target_metrics else ("N全平均" if obs_mode_global == "局域范围" else "N")
+
+        fig_cv, ax_cv = plt.subplots(figsize=(4, 3.5))
+        plot_results = []
+
+        for idx, row in converge_df.iterrows():
+            t_cv, o_cv, p0_cv, p1_cv, p2_cv, e_cv = get_real_data(row['file_path'], time_axis_unit)
+            if len(t_cv) > 0:
+                y_cv = process_target_data(t_cv, o_cv, p0_cv, p1_cv, p2_cv, param_L, obs_mode_global, config_val,
+                                           test_metric)
+
+                label = f"χ={row['chi']}"
+                if idx == 0: label += " (基准)"
+                ax_cv.plot(t_cv, y_cv, label=label, linewidth=1.2)
+                plot_results.append({'chi': row['chi'], 'y': y_cv, 't': t_cv})
+
+        ax_cv.set_title(f"收敛测试: {test_metric}", fontsize=10)
+        ax_cv.tick_params(labelsize=8)
+        ax_cv.legend(fontsize=7)
+        st.pyplot(fig_cv)
+
+        # 计算差异统计（以最大的 chi 为基准）
+        if len(plot_results) >= 2:
+            base = plot_results[0]['y']
+            test = plot_results[1]['y']
+
+            # 对齐长度
+            mlen = min(len(base), len(test))
+            y_base = base[:mlen]
+            y_test = test[:mlen]
+
+            diff_abs = np.abs(y_base - y_test)
+            max_abs = np.max(diff_abs)
+
+            # 相对偏差（百分比）
+            norm = np.max(np.abs(y_base))
+            max_rel = (max_abs / norm * 100) if norm > 1e-9 else 0
+
+            st.markdown("---")
+            st.markdown(f"**误差统计 (vs χ={plot_results[0]['chi']}):**")
+            st.write(f"- 最大绝对偏差: `{max_abs:.2e}`")
+            st.write(f"- 最大相对偏差: `{max_rel:.4f} %`")
+
+            if max_rel < 0.1:
+                st.success("✅ 收敛良好")
+            elif max_rel < 1.0:
+                st.info("⚠️ 基本收敛")
+            else:
+                st.error("🚨 尚未收敛")
