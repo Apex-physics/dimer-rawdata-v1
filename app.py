@@ -5,7 +5,6 @@ import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
 import os
 import datetime
-import re  # 仅用于处理文件名中 eta=0.2 和 eta0.2 这两种差异
 
 # ================= 解决 Matplotlib 中文乱码问题 =================
 font_path = os.path.join(os.path.dirname(__file__), "simhei.ttf")
@@ -22,7 +21,6 @@ st.set_page_config(page_title="量子多体动力学数据看板", layout="wide"
 DATA_DIR = os.path.join(os.path.dirname(__file__), "RawData")
 REGISTRY_FILE = "file_registry.csv"
 
-
 # ================= 1. 数据扫描与建库逻辑 =================
 def scan_and_build_registry():
     records = []
@@ -32,7 +30,7 @@ def scan_and_build_registry():
     for root, dirs, files in os.walk(DATA_DIR):
         folder_name = os.path.basename(root)
 
-        # 【恢复为您原始完美的文件夹解析逻辑】
+        # 文件夹命名严格一致，提取物理参数
         if not folder_name.startswith("L="):
             continue
 
@@ -50,20 +48,18 @@ def scan_and_build_registry():
         for file in files:
             if file.endswith('.npz') and file.startswith('SimData'):
                 try:
-                    # 【极简修改】智能提取 eta，兼容 "eta=0.200" 和 "eta0.200" 两种格式
-                    eta = 0.0
-                    eta_match = re.search(r'eta[=]?([\d\.]+)', file)
-                    if eta_match:
-                        eta = float(eta_match.group(1))
+                    # 【极简修改】直接用 split 提取 eta，无视后面是否有 t 或 chi
+                    eta_str = file.split('eta=')[1].split('_')[0].replace('.npz', '')
+                    eta = float(eta_str)
 
                     file_path = os.path.join(root, file)
                     data = np.load(file_path, allow_pickle=True)
                     meta_dict = data['metadata'][0]
 
-                    # 智能提取 chi，兼容 "chi=700" 和 "chi700"
-                    chi_match = re.search(r'chi[=]?(\d+)', file)
-                    if chi_match:
-                        chi = int(chi_match.group(1))
+                    # 提取 chi，如果文件名里有就用文件名的，没有就去 metadata 里读
+                    if 'chi=' in file:
+                        chi_str = file.split('chi=')[1].split('_')[0].replace('.npz', '')
+                        chi = int(chi_str)
                     else:
                         chi = int(meta_dict.get('chi_max', 512))
 
@@ -86,13 +82,11 @@ def scan_and_build_registry():
     else:
         return False, "未找到任何有效数据"
 
-
 @st.cache_data
 def load_registry(last_refresh_time):
     if os.path.exists(REGISTRY_FILE):
         return pd.read_csv(REGISTRY_FILE)
     return pd.DataFrame()
-
 
 # ================= 2. 真实数据读取与处理引擎 =================
 @st.cache_data
@@ -110,7 +104,6 @@ def get_real_data(file_path, time_unit='t*J'):
         return times, occ_arr, P0_arr, P1_arr, P2_arr, err_prop
     except Exception as e:
         return np.array([]), None, None, None, None, np.array([])
-
 
 def process_target_data(times, occ_arr, P0_arr, P1_arr, P2_arr, L, obs_mode, site_or_range, metric):
     """根据选项切片并计算物理量，数据缺失时返回 None"""
@@ -153,7 +146,6 @@ def process_target_data(times, occ_arr, P0_arr, P1_arr, P2_arr, L, obs_mode, sit
 
     return None
 
-
 def apply_truncation(times, y_data, error, cutoff_mode, custom_err_limit=None):
     if cutoff_mode == "自定义误差截断" and custom_err_limit is not None:
         exceed_indices = np.where(error > custom_err_limit)[0]
@@ -161,7 +153,6 @@ def apply_truncation(times, y_data, error, cutoff_mode, custom_err_limit=None):
             idx = exceed_indices[0]
             return times[:idx], y_data[:idx]
     return times, y_data
-
 
 # ================= 对比池初始化 =================
 if 'compare_lines' not in st.session_state:
