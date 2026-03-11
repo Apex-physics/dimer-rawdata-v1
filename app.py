@@ -4,7 +4,6 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
 import os
-import io
 import datetime
 
 # ================= 解决 Matplotlib 中文乱码问题 =================
@@ -23,7 +22,7 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), "RawData")
 REGISTRY_FILE = "file_registry.csv"
 
 
-# ================= 1. 数据扫描与建库逻辑 =================
+# ================= 1. 数据扫描与建库逻辑 (极简暴力读取) =================
 def scan_and_build_registry():
     records = []
     if not os.path.exists(DATA_DIR):
@@ -34,8 +33,16 @@ def scan_and_build_registry():
         if not folder_name.startswith("L="):
             continue
 
+        # 1. 暴力解析文件夹名字，提取 L, Init, Freq, U, J
+        params = {}
+        for item in folder_name.split('_'):
+            if '=' in item:
+                k, v = item.split('=', 1)
+                params[k] = v
+            elif item.upper() == 'TWOVACANCY':  # 兼容直接写 TWOVACANCY 而没写 Init= 的情况
+                params['Init'] = item
+
         try:
-            params = dict(item.split('=') for item in folder_name.split('_'))
             L = int(params.get('L', 0))
             init_state = params.get('Init', 'Unknown')
             freq = params.get('Freq', 'Unknown')
@@ -44,21 +51,23 @@ def scan_and_build_registry():
         except Exception:
             continue
 
+        # 2. 遍历文件，只读 eta 和 chi，其余时间信息全部无视
         for file in files:
             if file.endswith('.npz') and file.startswith('SimData'):
                 try:
-                    eta_str = file.split('eta=')[1].split('_')[0]
-                    eta = float(eta_str)
-                except Exception:
+                    # 强行抓取 eta
                     eta = 0.0
+                    if 'eta=' in file:
+                        eta_str = file.split('eta=')[1].split('_')[0].replace('.npz', '')
+                        eta = float(eta_str)
 
-                file_path = os.path.join(root, file)
-                try:
+                    file_path = os.path.join(root, file)
                     data = np.load(file_path, allow_pickle=True)
                     meta_dict = data['metadata'][0]
 
+                    # 强行抓取 chi
                     if 'chi=' in file:
-                        chi_str = file.split('chi=')[-1].replace('.npz', '')
+                        chi_str = file.split('chi=')[1].split('_')[0].replace('.npz', '')
                         chi = int(chi_str)
                     else:
                         chi = int(meta_dict.get('chi_max', 512))
@@ -66,13 +75,14 @@ def scan_and_build_registry():
                     nmax = int(meta_dict.get('n_max', 3))
                     bc = 'OBC'
                     data.close()
-                except Exception:
-                    chi, nmax, bc = -1, -1, 'Error'
 
-                records.append({
-                    'L': L, 'Init': init_state, 'Freq': freq, 'U': U, 'J': J,
-                    'eta': eta, 'chi': chi, 'nmax': nmax, 'bc': bc, 'file_path': file_path
-                })
+                    records.append({
+                        'L': L, 'Init': init_state, 'Freq': freq, 'U': U, 'J': J,
+                        'eta': eta, 'chi': chi, 'nmax': nmax, 'bc': bc, 'file_path': file_path
+                    })
+                except Exception as e:
+                    # 某个文件彻底坏了就跳过，不影响整体崩溃
+                    continue
 
     if records:
         df = pd.DataFrame(records)
@@ -97,7 +107,6 @@ def get_real_data(file_path, time_unit='t*J'):
     try:
         data = np.load(file_path, allow_pickle=True)
         times = data['times_tJ'] if time_unit == 't*J' else data['times_ms']
-        # 使用 in 判断，缺失的量赋 None，供后续防错处理
         occ_arr = data['occ_arr'] if 'occ_arr' in data else None
         P0_arr = data['P0_arr'] if 'P0_arr' in data else None
         P1_arr = data['P1_arr'] if 'P1_arr' in data else None
@@ -114,7 +123,6 @@ def process_target_data(times, occ_arr, P0_arr, P1_arr, P2_arr, L, obs_mode, sit
     if len(times) == 0: return None
     center_idx = L // 2
 
-    # 映射字典
     arr_map = {
         "N": occ_arr, "P0": P0_arr, "P1": P1_arr, "P2": P2_arr,
         "N全平均": occ_arr, "N_odd平均": occ_arr, "N_even平均": occ_arr, "Imbalance": occ_arr,
@@ -124,8 +132,7 @@ def process_target_data(times, occ_arr, P0_arr, P1_arr, P2_arr, L, obs_mode, sit
     }
 
     target_arr = arr_map.get(metric)
-    if target_arr is None:
-        return None  # 该物理量在 npz 文件中不存在
+    if target_arr is None: return None
 
     if obs_mode == "单格点":
         idx = site_or_range - 1
@@ -162,17 +169,6 @@ def apply_truncation(times, y_data, error, cutoff_mode, custom_err_limit=None):
     return times, y_data
 
 
-# 用于多选带 "全部" 选项的辅助函数
-def multi_select_with_all(col, label, options):
-    opts = ["全部"] + [str(x) for x in options]
-    selected = col.multiselect(label, opts, default=["全部"])
-    if "全部" in selected:
-        return list(options)
-    # 类型转换恢复
-    mapping = {str(x): x for x in options}
-    return [mapping[x] for x in selected if x in mapping]
-
-
 # ================= 对比池初始化 =================
 if 'compare_lines' not in st.session_state:
     st.session_state.compare_lines = []
@@ -201,9 +197,9 @@ if df_registry.empty:
 st.sidebar.markdown("### 全局视图")
 time_axis_unit = st.sidebar.radio("横坐标时间单位", ["t*J", "ms"])
 obs_mode_global = st.sidebar.radio("观察区域模式", ["单格点", "局域范围"])
-
 st.sidebar.markdown("---")
-st.sidebar.markdown("### 物理参数筛选 (单组探索)")
+
+st.sidebar.markdown("### 物理参数筛选 (单组)")
 param_L = st.sidebar.selectbox("系统尺寸 (L)", sorted(df_registry['L'].unique()))
 df_f = df_registry[df_registry['L'] == param_L]
 
@@ -222,7 +218,7 @@ df_f = df_f[df_f['J'] == param_J]
 param_eta = st.sidebar.selectbox("驱动强度 (η)", sorted(df_f['eta'].unique()))
 df_f = df_f[df_f['eta'] == param_eta]
 
-# 屏蔽了左侧栏的 chi 选择，单组数据自动提取目前最大且非 700 的 chi 数据
+# 单数据锁定为最大有效 chi (排除700)
 available_chis_for_info = sorted(df_f['chi'].unique(), reverse=True)
 valid_chis = [c for c in available_chis_for_info if c != 700]
 
@@ -230,7 +226,6 @@ if not valid_chis:
     st.error("该实验条件下除基准(chi=700)外无生产数据。")
     st.stop()
 
-# 单数据锁定为最大有效 chi
 active_chi = max(valid_chis)
 current_data_row = df_f[df_f['chi'] == active_chi].iloc[0].to_dict()
 
@@ -238,7 +233,7 @@ current_data_row = df_f[df_f['chi'] == active_chi].iloc[0].to_dict()
 st.title("量子多体动力学看板")
 col_algo, col_chi, col_nmax, col_bc = st.columns(4)
 col_algo.metric("算法", "TEBD (TeNPy)")
-# 顶部动态显示目前该组合下包含的所有 chi (转字符串拼接)
+# 顶部动态显示目前该组合下包含的所有 chi
 col_chi.metric("包含的 χ (此组合下)", ", ".join(map(str, available_chis_for_info)))
 col_nmax.metric("局域玻色子 (n_max)", current_data_row['nmax'])
 col_bc.metric("边界条件", current_data_row['bc'])
@@ -265,13 +260,8 @@ with col_main:
             range_opts = [i for i in range(1, param_L + 1) if i % 2 != 0]
             if param_L not in range_opts: range_opts.append(param_L)
             target_range = col_cfg1.selectbox("中心局域范围 (包含格点数)", range_opts, index=len(range_opts) - 1)
-
-            metric_opts = [
-                "N全平均", "N_odd平均", "N_even平均", "Imbalance",
-                "P0全平均", "P0_odd平均", "P0_even平均",
-                "P1全平均", "P1_odd平均", "P1_even平均",
-                "P2全平均", "P2_odd平均", "P2_even平均"
-            ]
+            metric_opts = ["N全平均", "N_odd平均", "N_even平均", "Imbalance", "P0全平均", "P0_odd平均", "P0_even平均",
+                           "P1全平均", "P1_odd平均", "P1_even平均", "P2全平均", "P2_odd平均", "P2_even平均"]
             target_metrics = col_cfg2.multiselect("输出物理量", metric_opts, default=["N全平均"])
             config_val = target_range
             label_prefix = f"范围 {target_range}"
@@ -302,54 +292,54 @@ with col_main:
             ax.legend()
             st.pyplot(fig)
 
-            with st.expander("查看传递误差累积曲线 (Propagation Error)", expanded=False):
-                fig_err, ax_err = plt.subplots(figsize=(9, 2.5))
-                ax_err.plot(times, err_prop, color='orange', linestyle='-', label='传递误差 (Propagation Error)')
-                if single_cutoff_mode == "自定义误差截断" and single_err_limit is not None:
-                    ax_err.axhline(single_err_limit, color='r', linestyle='--', label=f'截断阈值: {single_err_limit}%')
-                ax_err.set_xlabel(f"Time ({time_axis_unit})")
-                ax_err.set_ylabel("Error (%)")
-                ax_err.grid(True, alpha=0.3)
-                ax_err.legend()
-                st.pyplot(fig_err)
+            # 直接显示误差曲线 (去掉了 expander)
+            st.markdown("##### 传递误差累积曲线 (Propagation Error)")
+            fig_err, ax_err = plt.subplots(figsize=(9, 2.5))
+            ax_err.plot(times, err_prop, color='orange', linestyle='-', label='传递误差')
+            if single_cutoff_mode == "自定义误差截断" and single_err_limit is not None:
+                ax_err.axhline(single_err_limit, color='r', linestyle='--', label=f'截断阈值: {single_err_limit}%')
+            ax_err.set_xlabel(f"Time ({time_axis_unit})")
+            ax_err.set_ylabel("Error (%)")
+            ax_err.grid(True, alpha=0.3)
+            ax_err.legend()
+            st.pyplot(fig_err)
         elif len(times) == 0:
             st.error("数据读取失败，请检查 npz 文件。")
         else:
             st.info("请选择至少一个物理量。")
 
-    # ---------------- 标签页 B：跨条件四级搜索构建器 (完全重构的多选模式) ----------------
+    # ---------------- 标签页 B：跨条件四级搜索构建器 (完全级联选择) ----------------
     with tab_compare:
         st.markdown("#### 批量自由对比构建器")
 
         df_c = df_registry.copy()
 
-        # 参数多选面板
+        # 严格级联过滤：前一项没选，后一项直接为空，默认都是空
         col_m1, col_m2, col_m3, col_m4 = st.columns(4)
         col_m5, col_m6, col_m7 = st.columns(3)
 
-        s_L = multi_select_with_all(col_m1, "L", sorted(df_c['L'].unique()))
-        df_c = df_c[df_c['L'].isin(s_L)]
+        s_L = col_m1.multiselect("L", sorted(df_c['L'].unique()), default=[])
+        df_c = df_c[df_c['L'].isin(s_L)] if s_L else df_c.iloc[0:0]
 
-        s_Init = multi_select_with_all(col_m2, "Init", sorted(df_c['Init'].unique()))
-        df_c = df_c[df_c['Init'].isin(s_Init)]
+        s_Init = col_m2.multiselect("Init", sorted(df_c['Init'].unique()), default=[])
+        df_c = df_c[df_c['Init'].isin(s_Init)] if s_Init else df_c.iloc[0:0]
 
-        s_Freq = multi_select_with_all(col_m3, "Freq", sorted(df_c['Freq'].unique()))
-        df_c = df_c[df_c['Freq'].isin(s_Freq)]
+        s_Freq = col_m3.multiselect("Freq", sorted(df_c['Freq'].unique()), default=[])
+        df_c = df_c[df_c['Freq'].isin(s_Freq)] if s_Freq else df_c.iloc[0:0]
 
-        s_U = multi_select_with_all(col_m4, "U", sorted(df_c['U'].unique()))
-        df_c = df_c[df_c['U'].isin(s_U)]
+        s_U = col_m4.multiselect("U", sorted(df_c['U'].unique()), default=[])
+        df_c = df_c[df_c['U'].isin(s_U)] if s_U else df_c.iloc[0:0]
 
-        s_J = multi_select_with_all(col_m5, "J", sorted(df_c['J'].unique()))
-        df_c = df_c[df_c['J'].isin(s_J)]
+        s_J = col_m5.multiselect("J", sorted(df_c['J'].unique()), default=[])
+        df_c = df_c[df_c['J'].isin(s_J)] if s_J else df_c.iloc[0:0]
 
-        s_eta = multi_select_with_all(col_m6, "η", sorted(df_c['eta'].unique()))
-        df_c = df_c[df_c['eta'].isin(s_eta)]
+        s_eta = col_m6.multiselect("η", sorted(df_c['eta'].unique()), default=[])
+        df_c = df_c[df_c['eta'].isin(s_eta)] if s_eta else df_c.iloc[0:0]
 
-        s_chi = multi_select_with_all(col_m7, "χ", sorted(df_c['chi'].unique()))
-        df_c = df_c[df_c['chi'].isin(s_chi)]
+        s_chi = col_m7.multiselect("χ", sorted(df_c['chi'].unique()), default=[])
+        df_c = df_c[df_c['chi'].isin(s_chi)] if s_chi else df_c.iloc[0:0]
 
         st.markdown("---")
-        # 观察模式配置
         c_obs1, c_obs2, c_obs3 = st.columns(3)
         b_obs_mode = c_obs1.radio("[2] 观察区域", ["单格点", "局域范围"], horizontal=True, key="b_obs_mode")
 
@@ -357,8 +347,8 @@ with col_main:
 
         if b_obs_mode == "单格点":
             min_L = min(unique_Ls) if unique_Ls else 1
-            b_site_or_range = c_obs2.number_input(f"[3] 格点数 (最大限制 {min_L})", min_value=1, max_value=min_L,
-                                                  value=min_L // 2 + 1, key="b_site")
+            b_site_or_range = c_obs2.number_input(f"[3] 格点数 (当前选择组中最小限制 {min_L})", min_value=1,
+                                                  max_value=min_L, value=min_L // 2 + 1, key="b_site")
             b_metric_opts = ["和现有输出一致", "N", "P0", "P1", "P2"]
         else:
             if len(unique_Ls) > 1:
@@ -381,14 +371,13 @@ with col_main:
 
         if st.button("将选中组合批量加入对比池"):
             if df_c.empty:
-                st.warning("当前选择的参数组合下没有数据可添加。")
+                st.warning("当前没有选择任何有效数据可添加，请确保在上方完成了所有参数(含χ)的选择。")
             else:
                 metrics_to_add = [b_metric] if b_metric != "和现有输出一致" else target_metrics
                 added_count = 0
                 missing_warnings = set()
 
                 for _, row in df_c.iterrows():
-                    # 动态解析局域范围 L-x
                     actual_range = b_site_or_range
                     if isinstance(b_site_or_range, str) and b_obs_mode == "局域范围":
                         if b_site_or_range == "全局":
@@ -421,7 +410,7 @@ with col_main:
                     st.success(f"成功将 {added_count} 条曲线加入对比池！")
                 if missing_warnings:
                     for w in list(missing_warnings)[:5]:
-                        st.warning(w + "，已跳过。")
+                        st.warning(w + "，已跳过画图。")
                     if len(missing_warnings) > 5:
                         st.warning(f"... 等共 {len(missing_warnings)} 个缺失数据文件被安全跳过。")
 
@@ -443,7 +432,7 @@ with col_main:
                 t_m, o_m, p0_m, p1_m, p2_m, e_m = get_real_data(line['file_path'], time_axis_unit)
                 y_m = process_target_data(t_m, o_m, p0_m, p1_m, p2_m, line['L'], line['obs_mode'],
                                           line['site_or_range'], line['metric'])
-                if y_m is None: continue  # 防御性跳过
+                if y_m is None: continue
                 t_plot, y_plot = apply_truncation(t_m, y_m, e_m, comp_x_mode, comp_err_limit)
                 if len(t_plot) > 0:
                     max_times.append(t_plot[-1])
@@ -464,7 +453,6 @@ with col_main:
 with col_side:
     st.markdown("### 截断收敛性验证")
 
-    # 1. 寻找相同 L 和 Init 下的 chi=700 极端数据
     ref_df_700 = df_registry[
         (df_registry['L'] == param_L) &
         (df_registry['Init'] == param_init) &
@@ -474,11 +462,9 @@ with col_side:
     if ref_df_700.empty:
         st.write("暂无对比数据")
     else:
-        # 取第一条 chi=700 数据，提取其全部极端条件
         ref_700_row = ref_df_700.iloc[0]
         ref_F, ref_U, ref_J, ref_eta = ref_700_row['Freq'], ref_700_row['U'], ref_700_row['J'], ref_700_row['eta']
 
-        # 2. 去数据库找与它“完全同条件”，但是 chi 为当前常规 chi（非700）的数据来做对比
         cur_df_match = df_registry[
             (df_registry['L'] == param_L) &
             (df_registry['Init'] == param_init) &
@@ -492,11 +478,9 @@ with col_side:
         if cur_df_match.empty:
             st.write("未能找到同条件的普通数据进行对比")
         else:
-            # 取该条件下最大的普通 chi
             cur_match_row = cur_df_match.sort_values(by='chi', ascending=False).iloc[0]
             comp_chi = cur_match_row['chi']
 
-            # 3. 确定测量的物理量 (取最后一次选择的数据，无选择则默认 N_even平均)
             if 'target_metrics' in locals() and target_metrics:
                 test_metric = target_metrics[-1]
                 c_mode = obs_mode_global
@@ -506,16 +490,13 @@ with col_side:
                 c_mode = "局域范围"
                 c_val = param_L
 
-            # 4. 读取与处理数据
             t_ref, o_ref, p0_ref, p1_ref, p2_ref, _ = get_real_data(ref_700_row['file_path'], time_axis_unit)
             y_ref = process_target_data(t_ref, o_ref, p0_ref, p1_ref, p2_ref, param_L, c_mode, c_val, test_metric)
 
             t_cur, o_cur, p0_cur, p1_cur, p2_cur, _ = get_real_data(cur_match_row['file_path'], time_axis_unit)
             y_cur = process_target_data(t_cur, o_cur, p0_cur, p1_cur, p2_cur, param_L, c_mode, c_val, test_metric)
 
-            # 确保两边都没有缺失物理量再画图
             if y_ref is not None and y_cur is not None:
-                # 5. 绘图
                 fig_cv, ax_cv = plt.subplots(figsize=(4, 3.5))
                 ax_cv.plot(t_ref, y_ref, 'k--', label="χ=700", alpha=0.7)
                 ax_cv.plot(t_cur, y_cur, 'r-', label=f"χ={comp_chi}", linewidth=1.2)
@@ -524,7 +505,6 @@ with col_side:
                 ax_cv.legend(fontsize=7)
                 st.pyplot(fig_cv)
 
-                # 6. 计算 1% 误差的时间点
                 mlen = min(len(y_ref), len(y_cur))
                 if mlen > 0:
                     diff = np.abs(y_ref[:mlen] - y_cur[:mlen])
