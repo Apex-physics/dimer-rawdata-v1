@@ -4,7 +4,9 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
 import os
+import io
 import datetime
+import re  # <--- 新增：正则表达式模块，用于智能处理不同命名模式
 
 # ================= 解决 Matplotlib 中文乱码问题 =================
 font_path = os.path.join(os.path.dirname(__file__), "simhei.ttf")
@@ -22,7 +24,7 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), "RawData")
 REGISTRY_FILE = "file_registry.csv"
 
 
-# ================= 1. 数据扫描与建库逻辑 (极简暴力读取) =================
+# ================= 1. 数据扫描与建库逻辑 (正则智能读取版) =================
 def scan_and_build_registry():
     records = []
     if not os.path.exists(DATA_DIR):
@@ -33,13 +35,13 @@ def scan_and_build_registry():
         if not folder_name.startswith("L="):
             continue
 
-        # 1. 暴力解析文件夹名字，提取 L, Init, Freq, U, J
+        # 暴力解析文件夹名字
         params = {}
         for item in folder_name.split('_'):
             if '=' in item:
                 k, v = item.split('=', 1)
                 params[k] = v
-            elif item.upper() == 'TWOVACANCY':  # 兼容直接写 TWOVACANCY 而没写 Init= 的情况
+            elif item.upper() == 'TWOVACANCY':
                 params['Init'] = item
 
         try:
@@ -51,24 +53,23 @@ def scan_and_build_registry():
         except Exception:
             continue
 
-        # 2. 遍历文件，只读 eta 和 chi，其余时间信息全部无视
         for file in files:
             if file.endswith('.npz') and file.startswith('SimData'):
                 try:
-                    # 强行抓取 eta
+                    # 使用正则表达式智能提取 eta，兼容 "eta=0.2" 和 "eta0.2"
                     eta = 0.0
-                    if 'eta=' in file:
-                        eta_str = file.split('eta=')[1].split('_')[0].replace('.npz', '')
-                        eta = float(eta_str)
+                    eta_match = re.search(r'eta[=]?([\d\.]+)', file)
+                    if eta_match:
+                        eta = float(eta_match.group(1))
 
                     file_path = os.path.join(root, file)
                     data = np.load(file_path, allow_pickle=True)
                     meta_dict = data['metadata'][0]
 
-                    # 强行抓取 chi
-                    if 'chi=' in file:
-                        chi_str = file.split('chi=')[1].split('_')[0].replace('.npz', '')
-                        chi = int(chi_str)
+                    # 智能提取 chi，兼容 "chi=700" 和 "chi700"
+                    chi_match = re.search(r'chi[=]?(\d+)', file)
+                    if chi_match:
+                        chi = int(chi_match.group(1))
                     else:
                         chi = int(meta_dict.get('chi_max', 512))
 
@@ -81,7 +82,6 @@ def scan_and_build_registry():
                         'eta': eta, 'chi': chi, 'nmax': nmax, 'bc': bc, 'file_path': file_path
                     })
                 except Exception as e:
-                    # 某个文件彻底坏了就跳过，不影响整体崩溃
                     continue
 
     if records:
@@ -292,7 +292,6 @@ with col_main:
             ax.legend()
             st.pyplot(fig)
 
-            # 直接显示误差曲线 (去掉了 expander)
             st.markdown("##### 传递误差累积曲线 (Propagation Error)")
             fig_err, ax_err = plt.subplots(figsize=(9, 2.5))
             ax_err.plot(times, err_prop, color='orange', linestyle='-', label='传递误差')
