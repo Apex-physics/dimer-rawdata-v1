@@ -1,10 +1,10 @@
 import streamlit as st
 import numpy as np
 import pandas as pd
-import matplotlib.subplots as plt_subplots
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
 import os
+import io
 import datetime
 
 # ================= 解决 Matplotlib 中文乱码问题 =================
@@ -23,7 +23,7 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), "RawData")
 REGISTRY_FILE = "file_registry.csv"
 
 
-# ================= 1. 数据扫描与建库逻辑 (修复了解析 Bug) =================
+# ================= 1. 数据扫描与建库逻辑 =================
 def scan_and_build_registry():
     records = []
     if not os.path.exists(DATA_DIR):
@@ -34,17 +34,8 @@ def scan_and_build_registry():
         if not folder_name.startswith("L="):
             continue
 
-        # 更健壮的文件夹参数解析，防止因为额外下划线导致整个文件夹被跳过
-        params = {}
-        for item in folder_name.split('_'):
-            if '=' in item:
-                k, v = item.split('=', 1)
-                params[k] = v
-
-        if not params:
-            continue
-
         try:
+            params = dict(item.split('=') for item in folder_name.split('_'))
             L = int(params.get('L', 0))
             init_state = params.get('Init', 'Unknown')
             freq = params.get('Freq', 'Unknown')
@@ -55,27 +46,20 @@ def scan_and_build_registry():
 
         for file in files:
             if file.endswith('.npz') and file.startswith('SimData'):
-                # 健壮的 eta 解析
-                eta = 0.0
-                if 'eta=' in file:
-                    eta_part = file.split('eta=')[1].split('_')[0].replace('.npz', '')
-                    try:
-                        eta = float(eta_part)
-                    except Exception:
-                        pass
+                try:
+                    eta_str = file.split('eta=')[1].split('_')[0]
+                    eta = float(eta_str)
+                except Exception:
+                    eta = 0.0
 
                 file_path = os.path.join(root, file)
                 try:
                     data = np.load(file_path, allow_pickle=True)
                     meta_dict = data['metadata'][0]
 
-                    # 健壮的 chi 解析
                     if 'chi=' in file:
-                        chi_part = file.split('chi=')[-1].replace('.npz', '')
-                        try:
-                            chi = int(chi_part)
-                        except Exception:
-                            chi = int(meta_dict.get('chi_max', 512))
+                        chi_str = file.split('chi=')[-1].replace('.npz', '')
+                        chi = int(chi_str)
                     else:
                         chi = int(meta_dict.get('chi_max', 512))
 
@@ -178,6 +162,17 @@ def apply_truncation(times, y_data, error, cutoff_mode, custom_err_limit=None):
     return times, y_data
 
 
+# 用于多选带 "全部" 选项的辅助函数
+def multi_select_with_all(col, label, options):
+    opts = ["全部"] + [str(x) for x in options]
+    selected = col.multiselect(label, opts, default=["全部"])
+    if "全部" in selected:
+        return list(options)
+    # 类型转换恢复
+    mapping = {str(x): x for x in options}
+    return [mapping[x] for x in selected if x in mapping]
+
+
 # ================= 对比池初始化 =================
 if 'compare_lines' not in st.session_state:
     st.session_state.compare_lines = []
@@ -243,7 +238,7 @@ current_data_row = df_f[df_f['chi'] == active_chi].iloc[0].to_dict()
 st.title("量子多体动力学看板")
 col_algo, col_chi, col_nmax, col_bc = st.columns(4)
 col_algo.metric("算法", "TEBD (TeNPy)")
-# 顶部动态显示目前该组合下包含的所有 chi
+# 顶部动态显示目前该组合下包含的所有 chi (转字符串拼接)
 col_chi.metric("包含的 χ (此组合下)", ", ".join(map(str, available_chis_for_info)))
 col_nmax.metric("局域玻色子 (n_max)", current_data_row['nmax'])
 col_bc.metric("边界条件", current_data_row['bc'])
@@ -322,36 +317,36 @@ with col_main:
         else:
             st.info("请选择至少一个物理量。")
 
-    # ---------------- 标签页 B：跨条件四级搜索构建器 (多选级联重构) ----------------
+    # ---------------- 标签页 B：跨条件四级搜索构建器 (完全重构的多选模式) ----------------
     with tab_compare:
         st.markdown("#### 批量自由对比构建器")
 
         df_c = df_registry.copy()
 
-        # 强制级联的多选框逻辑：如果不选前置条件，后续条件自动为空（必须挨个选）
+        # 参数多选面板
         col_m1, col_m2, col_m3, col_m4 = st.columns(4)
         col_m5, col_m6, col_m7 = st.columns(3)
 
-        s_L = col_m1.multiselect("L", sorted(df_c['L'].unique()), default=[])
-        df_c = df_c[df_c['L'].isin(s_L)] if s_L else df_c.iloc[0:0]
+        s_L = multi_select_with_all(col_m1, "L", sorted(df_c['L'].unique()))
+        df_c = df_c[df_c['L'].isin(s_L)]
 
-        s_Init = col_m2.multiselect("Init", sorted(df_c['Init'].unique()), default=[])
-        df_c = df_c[df_c['Init'].isin(s_Init)] if s_Init else df_c.iloc[0:0]
+        s_Init = multi_select_with_all(col_m2, "Init", sorted(df_c['Init'].unique()))
+        df_c = df_c[df_c['Init'].isin(s_Init)]
 
-        s_Freq = col_m3.multiselect("Freq", sorted(df_c['Freq'].unique()), default=[])
-        df_c = df_c[df_c['Freq'].isin(s_Freq)] if s_Freq else df_c.iloc[0:0]
+        s_Freq = multi_select_with_all(col_m3, "Freq", sorted(df_c['Freq'].unique()))
+        df_c = df_c[df_c['Freq'].isin(s_Freq)]
 
-        s_U = col_m4.multiselect("U", sorted(df_c['U'].unique()), default=[])
-        df_c = df_c[df_c['U'].isin(s_U)] if s_U else df_c.iloc[0:0]
+        s_U = multi_select_with_all(col_m4, "U", sorted(df_c['U'].unique()))
+        df_c = df_c[df_c['U'].isin(s_U)]
 
-        s_J = col_m5.multiselect("J", sorted(df_c['J'].unique()), default=[])
-        df_c = df_c[df_c['J'].isin(s_J)] if s_J else df_c.iloc[0:0]
+        s_J = multi_select_with_all(col_m5, "J", sorted(df_c['J'].unique()))
+        df_c = df_c[df_c['J'].isin(s_J)]
 
-        s_eta = col_m6.multiselect("η", sorted(df_c['eta'].unique()), default=[])
-        df_c = df_c[df_c['eta'].isin(s_eta)] if s_eta else df_c.iloc[0:0]
+        s_eta = multi_select_with_all(col_m6, "η", sorted(df_c['eta'].unique()))
+        df_c = df_c[df_c['eta'].isin(s_eta)]
 
-        s_chi = col_m7.multiselect("χ", sorted(df_c['chi'].unique()), default=[])
-        df_c = df_c[df_c['chi'].isin(s_chi)] if s_chi else df_c.iloc[0:0]
+        s_chi = multi_select_with_all(col_m7, "χ", sorted(df_c['chi'].unique()))
+        df_c = df_c[df_c['chi'].isin(s_chi)]
 
         st.markdown("---")
         # 观察模式配置
@@ -362,8 +357,8 @@ with col_main:
 
         if b_obs_mode == "单格点":
             min_L = min(unique_Ls) if unique_Ls else 1
-            b_site_or_range = c_obs2.number_input(f"[3] 格点数 (当前选择组中最小限制 {min_L})", min_value=1,
-                                                  max_value=min_L, value=min_L // 2 + 1, key="b_site")
+            b_site_or_range = c_obs2.number_input(f"[3] 格点数 (最大限制 {min_L})", min_value=1, max_value=min_L,
+                                                  value=min_L // 2 + 1, key="b_site")
             b_metric_opts = ["和现有输出一致", "N", "P0", "P1", "P2"]
         else:
             if len(unique_Ls) > 1:
@@ -386,7 +381,7 @@ with col_main:
 
         if st.button("将选中组合批量加入对比池"):
             if df_c.empty:
-                st.warning("当前选择的参数组合下没有数据可添加，请在上方完成各项选择。")
+                st.warning("当前选择的参数组合下没有数据可添加。")
             else:
                 metrics_to_add = [b_metric] if b_metric != "和现有输出一致" else target_metrics
                 added_count = 0
@@ -426,7 +421,7 @@ with col_main:
                     st.success(f"成功将 {added_count} 条曲线加入对比池！")
                 if missing_warnings:
                     for w in list(missing_warnings)[:5]:
-                        st.warning(w + "，已跳过画图。")
+                        st.warning(w + "，已跳过。")
                     if len(missing_warnings) > 5:
                         st.warning(f"... 等共 {len(missing_warnings)} 个缺失数据文件被安全跳过。")
 
