@@ -4,9 +4,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
 import os
-import io
 import datetime
-import re  # <--- 新增：正则表达式模块，用于智能处理不同命名模式
+import re  # 仅用于处理文件名中 eta=0.2 和 eta0.2 这两种差异
 
 # ================= 解决 Matplotlib 中文乱码问题 =================
 font_path = os.path.join(os.path.dirname(__file__), "simhei.ttf")
@@ -24,7 +23,7 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), "RawData")
 REGISTRY_FILE = "file_registry.csv"
 
 
-# ================= 1. 数据扫描与建库逻辑 (正则智能读取版) =================
+# ================= 1. 数据扫描与建库逻辑 =================
 def scan_and_build_registry():
     records = []
     if not os.path.exists(DATA_DIR):
@@ -32,19 +31,13 @@ def scan_and_build_registry():
 
     for root, dirs, files in os.walk(DATA_DIR):
         folder_name = os.path.basename(root)
+
+        # 【恢复为您原始完美的文件夹解析逻辑】
         if not folder_name.startswith("L="):
             continue
 
-        # 暴力解析文件夹名字
-        params = {}
-        for item in folder_name.split('_'):
-            if '=' in item:
-                k, v = item.split('=', 1)
-                params[k] = v
-            elif item.upper() == 'TWOVACANCY':
-                params['Init'] = item
-
         try:
+            params = dict(item.split('=') for item in folder_name.split('_'))
             L = int(params.get('L', 0))
             init_state = params.get('Init', 'Unknown')
             freq = params.get('Freq', 'Unknown')
@@ -53,10 +46,11 @@ def scan_and_build_registry():
         except Exception:
             continue
 
+        # 遍历内部 npz 文件
         for file in files:
             if file.endswith('.npz') and file.startswith('SimData'):
                 try:
-                    # 使用正则表达式智能提取 eta，兼容 "eta=0.2" 和 "eta0.2"
+                    # 【极简修改】智能提取 eta，兼容 "eta=0.200" 和 "eta0.200" 两种格式
                     eta = 0.0
                     eta_match = re.search(r'eta[=]?([\d\.]+)', file)
                     if eta_match:
@@ -81,7 +75,7 @@ def scan_and_build_registry():
                         'L': L, 'Init': init_state, 'Freq': freq, 'U': U, 'J': J,
                         'eta': eta, 'chi': chi, 'nmax': nmax, 'bc': bc, 'file_path': file_path
                     })
-                except Exception as e:
+                except Exception:
                     continue
 
     if records:
