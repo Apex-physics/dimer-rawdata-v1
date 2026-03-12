@@ -62,9 +62,9 @@ def scan_and_build_registry():
                         chi_str = file.split('chi=')[1].split('_')[0].replace('.npz', '')
                         chi = int(chi_str)
                     else:
-                        chi = int(meta_dict.get('chi_max', 512))
+                        chi = int(meta_dict.get('chi_max', 0))
 
-                    nmax = int(meta_dict.get('n_max', 3))
+                    nmax = int(meta_dict.get('n_max', 0))
                     bc = 'OBC'
                     data.close()
 
@@ -454,6 +454,34 @@ with col_main:
             fig.subplots_adjust(right=0.75)
             ax_c.grid(True, alpha=0.3)
             st.pyplot(fig_c)
+            st.markdown("导出对比数据")
+            col_dl_c1, col_dl_c2 = st.columns(2)
+
+            # 1. 下载 PNG
+            buf_c = io.BytesIO()
+            fig_c.savefig(buf_c, format="png", bbox_inches='tight')
+            col_dl_c1.download_button("下载对比图 (PNG)", buf_c.getvalue(), "compare_plot.png", "image/png")
+
+            # 2. 下载 CSV (合并多条曲线)
+            if st.session_state.compare_lines:
+                compare_df = pd.DataFrame()
+                for line in st.session_state.compare_lines:
+                    t_m, o_m, p0_m, p1_m, p2_m, e_m = get_real_data(line['file_path'], time_axis_unit)
+                    y_m = process_target_data(t_m, o_m, p0_m, p1_m, p2_m, line['L'], line['obs_mode'],
+                                              line['site_or_range'], line['metric'])
+
+                    if y_m is not None:
+                        # 临时构建单条线的 DF
+                        temp_df = pd.DataFrame({f"Time({time_axis_unit})": t_m, line['desc']: y_m})
+                        # 按照时间轴合并 (使用 outer join 确保不丢失数据)
+                        if compare_df.empty:
+                            compare_df = temp_df
+                        else:
+                            compare_df = pd.merge(compare_df, temp_df, on=f"Time({time_axis_unit})", how="outer")
+
+                compare_df = compare_df.sort_values(by=f"Time({time_axis_unit})")
+                csv_c = compare_df.to_csv(index=False).encode('utf-8')
+                col_dl_c2.download_button("下载对比数据 (CSV)", csv_c, "compare_data.csv", "text/csv")
 
 # ---------------- 6. 右侧：截断收敛性展示 ----------------
 with col_side:
